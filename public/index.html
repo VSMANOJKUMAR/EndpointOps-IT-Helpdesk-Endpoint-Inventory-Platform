@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EndpointOps</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--text:#1c2430;--muted:#667085;--line:#e3e6eb;--brand:#2563eb;--danger:#dc2626;--ok:#16a34a;--warn:#d97706}
+@media (prefers-color-scheme:dark){:root{--bg:#0f141b;--card:#171e28;--text:#e6e9ee;--muted:#98a2b3;--line:#2a3441;--brand:#60a5fa;--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}}
+*{box-sizing:border-box}body{margin:0;font:14px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--text)}
+header{display:flex;align-items:center;gap:16px;padding:12px 24px;background:var(--card);border-bottom:1px solid var(--line);flex-wrap:wrap}
+header h1{font-size:18px;margin:0;color:var(--brand)}nav{display:flex;gap:4px;flex:1;flex-wrap:wrap}
+nav button,.btn{border:1px solid var(--line);background:var(--card);color:var(--text);padding:6px 12px;border-radius:6px;cursor:pointer;font:inherit}
+nav button.active,.btn.primary{background:var(--brand);color:#fff;border-color:var(--brand)}.btn.danger{color:var(--danger)}
+main{max-width:1000px;margin:24px auto;padding:0 16px}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+input,select,textarea{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--text);max-width:100%}
+textarea{width:100%;min-height:70px}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line)}th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase}
+tr.click{cursor:pointer}tr.click:hover{background:var(--bg)}.table-wrap{overflow-x:auto}
+.pill{padding:2px 8px;border-radius:99px;font-size:12px;border:1px solid var(--line)}
+.critical,.offline{color:var(--danger)}.high,.needs_attention{color:var(--warn)}.healthy,.resolved{color:var(--ok)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px}.stat{font-size:28px;font-weight:700}
+.muted{color:var(--muted)}.err{color:var(--danger);margin:8px 0}.auth{max-width:360px;margin:80px auto}.auth input{width:100%;margin-bottom:10px}
+.comment{border-left:3px solid var(--line);padding:4px 10px;margin:8px 0}.hidden{display:none}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let token = sessionStorage.getItem('token'), user = JSON.parse(sessionStorage.getItem('user') || 'null');
+let view = 'dashboard', state = { tq: '', tstatus: '', tprio: '', tpage: 1, dq: '', dstatus: '', dpage: 1 };
+const isStaff = () => user && (user.role === 'agent' || user.role === 'admin');
+
+async function api(method, url, body) {
+  const r = await fetch('/api' + url, { method, headers: { 'Content-Type': 'application/json', ...(token && { Authorization: 'Bearer ' + token }) }, body: body ? JSON.stringify(body) : undefined });
+  if (r.status === 401 && token) { logout(); throw new Error('Session expired'); }
+  const data = r.status === 204 ? null : await r.json();
+  if (!r.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+function logout() { token = null; user = null; sessionStorage.clear(); render(); }
+const debounce = (fn, ms = 300) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
+
+function render() {
+  if (!token) return renderAuth();
+  const tabs = [['dashboard', 'Dashboard'], ['tickets', 'Tickets'], ...(isStaff() ? [['devices', 'Devices']] : []), ...(user.role === 'admin' ? [['users', 'Users'], ['audit', 'Audit log']] : [])];
+  $('#app').innerHTML = `<header><h1>EndpointOps</h1><nav>${tabs.map(([k, l]) => `<button class="${view === k ? 'active' : ''}" data-view="${k}">${l}</button>`).join('')}</nav>
+    <span class="muted">${esc(user.name)} <span class="pill">${user.role}</span></span><button class="btn" id="logout">Logout</button></header><main id="main"></main>`;
+  document.querySelectorAll('[data-view]').forEach(b => b.onclick = () => { view = b.dataset.view; render(); });
+  $('#logout').onclick = logout;
+  ({ dashboard: renderDashboard, tickets: renderTickets, devices: renderDevices, users: renderUsers, audit: renderAudit })[view]();
+}
+
+function renderAuth(mode = 'login') {
+  $('#app').innerHTML = `<div class="card auth"><h2>${mode === 'login' ? 'Sign in' : 'Create account'}</h2>
+    ${mode === 'register' ? '<input id="name" placeholder="Full name">' : ''}<input id="email" type="email" placeholder="Email"><input id="pw" type="password" placeholder="Password (min 8 chars)"><label class="muted"><input type="checkbox" id="show" style="width:auto;margin-right:6px">Show password</label>
+    <div class="err" id="err"></div><button class="btn primary" id="go" style="width:100%">${mode === 'login' ? 'Login' : 'Register'}</button>
+    <p class="muted"><a href="#" id="sw">${mode === 'login' ? 'Need an account? Register' : 'Have an account? Login'}</a></p>
+    ${mode === 'login' ? '<p class="muted">Demo: admin@endpointops.dev / Admin@123<br>agent@endpointops.dev / Agent@123</p>' : ''}</div>`;
+  $('#sw').onclick = e => { e.preventDefault(); renderAuth(mode === 'login' ? 'register' : 'login'); };
+  $('#show').onchange = e => { $('#pw').type = e.target.checked ? 'text' : 'password'; };
+  const go = async () => {
+    try {
+      const body = { email: $('#email').value, password: $('#pw').value, ...(mode === 'register' && { name: $('#name').value }) };
+      const r = await api('POST', '/auth/' + mode, body);
+      token = r.token; user = r.user; sessionStorage.setItem('token', token); sessionStorage.setItem('user', JSON.stringify(user)); view = 'dashboard'; render();
+    } catch (e) { $('#err').textContent = e.message; }
+  };
+  $('#go').onclick = go; $('#pw').onkeydown = e => { if (e.key === 'Enter') go(); };
+}
+
+async function renderDashboard() {
+  const s = await api('GET', '/stats');
+  const box = (title, obj) => `<div class="card"><h3>${title}</h3>${Object.entries(obj || {}).map(([k, v]) => `<div class="row" style="justify-content:space-between;margin:4px 0"><span class="${k}">${k.replace('_', ' ')}</span><span class="stat" style="font-size:20px">${v}</span></div>`).join('') || '<span class="muted">No data</span>'}</div>`;
+  $('#main').innerHTML = `<div class="grid">${box('Tickets by status', s.ticketsByStatus)}${box('Tickets by priority', s.ticketsByPriority)}${s.devicesByStatus ? box('Device health', s.devicesByStatus) : ''}</div>`;
+}
+
+function pager(total, page, limit, id) {
+  const pages = Math.max(Math.ceil(total / limit), 1);
+  return `<div class="row"><button class="btn" data-pg="${id}" data-d="-1" ${page <= 1 ? 'disabled' : ''}>Prev</button><span class="muted">Page ${page} of ${pages} (${total} total)</span><button class="btn" data-pg="${id}" data-d="1" ${page >= pages ? 'disabled' : ''}>Next</button></div>`;
+}
+
+async function renderTickets() {
+  $('#main').innerHTML = `<div class="card"><div class="row"><input id="tq" placeholder="Search tickets..." value="${esc(state.tq)}">
+    <select id="tstatus"><option value="">All status</option>${['open', 'in_progress', 'resolved', 'closed'].map(s => `<option ${state.tstatus === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+    <select id="tprio"><option value="">All priority</option>${['low', 'medium', 'high', 'critical'].map(s => `<option ${state.tprio === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+    <button class="btn primary" id="newt">+ New ticket</button></div><div id="form"></div><div id="list"></div></div><div id="detail"></div>`;
+  const load = async () => {
+    const p = new URLSearchParams({ q: state.tq, status: state.tstatus, priority: state.tprio, page: state.tpage, limit: 8 });
+    const r = await api('GET', '/tickets?' + p);
+    $('#list').innerHTML = `<div class="table-wrap"><table><tr><th>#</th><th>Title</th><th>Status</th><th>Priority</th><th>Created by</th><th>Device</th></tr>
+      ${r.items.map(t => `<tr class="click" data-id="${t.id}"><td>${t.id}</td><td>${esc(t.title)}</td><td>${t.status.replace('_', ' ')}</td><td class="${t.priority}">${t.priority}</td><td>${esc(t.creator_name)}</td><td>${esc(t.device_hostname || '-')}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No tickets found</td></tr>'}</table></div>${pager(r.total, r.page, r.limit, 't')}`;
+    document.querySelectorAll('#list tr.click').forEach(tr => tr.onclick = () => openTicket(tr.dataset.id));
+    document.querySelectorAll('[data-pg="t"]').forEach(b => b.onclick = () => { state.tpage += +b.dataset.d; load(); });
+  };
+  $('#tq').oninput = debounce(e => { state.tq = e.target.value; state.tpage = 1; load(); });
+  $('#tstatus').onchange = e => { state.tstatus = e.target.value; state.tpage = 1; load(); };
+  $('#tprio').onchange = e => { state.tprio = e.target.value; state.tpage = 1; load(); };
+  $('#newt').onclick = async () => {
+    const devs = isStaff() ? (await api('GET', '/devices?limit=100')).items : [];
+    $('#form').innerHTML = `<div class="card"><input id="nt" placeholder="Title" style="width:100%;margin-bottom:8px"><textarea id="nd" placeholder="Describe the issue"></textarea>
+      <div class="row"><select id="np">${['low', 'medium', 'high', 'critical'].map(p => `<option ${p === 'medium' ? 'selected' : ''}>${p}</option>`).join('')}</select>
+      ${devs.length ? `<select id="ndev"><option value="">No device</option>${devs.map(d => `<option value="${d.id}">${esc(d.hostname)}</option>`).join('')}</select>` : ''}
+      <button class="btn primary" id="sub">Submit</button></div><div class="err" id="ferr"></div></div>`;
+    $('#sub').onclick = async () => {
+      try { await api('POST', '/tickets', { title: $('#nt').value, description: $('#nd').value, priority: $('#np').value, device_id: $('#ndev')?.value || null }); $('#form').innerHTML = ''; load(); }
+      catch (e) { $('#ferr').textContent = e.message; }
+    };
+  };
+  load();
+}
+
+async function openTicket(id) {
+  const t = await api('GET', '/tickets/' + id);
+  const agents = isStaff() ? (await api('GET', '/users')).filter(u => u.role !== 'user') : [];
+  $('#detail').innerHTML = `<div class="card"><h3>#${t.id} ${esc(t.title)}</h3><p>${esc(t.description)}</p>
+    <p class="muted">By ${esc(t.creator_name)} | Assignee: ${esc(t.assignee_name || 'unassigned')} | Device: ${esc(t.device_hostname || '-')}</p>
+    ${isStaff() ? `<div class="row"><select id="us">${['open', 'in_progress', 'resolved', 'closed'].map(s => `<option ${t.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+      <select id="ua"><option value="">Unassigned</option>${agents.map(a => `<option value="${a.id}" ${t.assignee_id === a.id ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
+      <button class="btn primary" id="save">Save</button>${user.role === 'admin' ? '<button class="btn danger" id="del">Delete</button>' : ''}</div>` : `<p>Status: <b>${t.status.replace('_', ' ')}</b></p>`}
+    <h4>Comments</h4>${t.comments.map(c => `<div class="comment"><b>${esc(c.author_name)}</b> <span class="muted">${esc(c.created_at)}</span><br>${esc(c.body)}</div>`).join('') || '<p class="muted">No comments yet</p>'}
+    <div class="row"><input id="cb" placeholder="Add a comment" style="flex:1"><button class="btn" id="cadd">Post</button></div><div class="err" id="derr"></div></div>`;
+  const run = fn => async () => { try { await fn(); } catch (e) { $('#derr').textContent = e.message; } };
+  $('#cadd').onclick = run(async () => { await api('POST', `/tickets/${id}/comments`, { body: $('#cb').value }); openTicket(id); });
+  if (isStaff()) $('#save').onclick = run(async () => { await api('PATCH', '/tickets/' + id, { status: $('#us').value, assignee_id: $('#ua').value ? +$('#ua').value : null }); renderTickets(); });
+  if (user.role === 'admin') $('#del').onclick = run(async () => { if (confirm('Delete this ticket?')) { await api('DELETE', '/tickets/' + id); renderTickets(); } });
+  $('#detail').scrollIntoView({ behavior: 'smooth' });
+}
+
+async function renderDevices() {
+  $('#main').innerHTML = `<div class="card"><div class="row"><input id="dq" placeholder="Search hostname, OS, IP..." value="${esc(state.dq)}">
+    <select id="dst"><option value="">All status</option>${['healthy', 'needs_attention', 'offline'].map(s => `<option ${state.dstatus === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
+    <div class="row"><input id="dh" placeholder="Hostname"><input id="dos" placeholder="OS"><input id="dip" placeholder="IP"><button class="btn primary" id="dadd">Add device</button></div><div class="err" id="derr"></div><div id="dl"></div></div>`;
+  const load = async () => {
+    const r = await api('GET', '/devices?' + new URLSearchParams({ q: state.dq, status: state.dstatus, page: state.dpage, limit: 8 }));
+    $('#dl').innerHTML = `<div class="table-wrap"><table><tr><th>Hostname</th><th>OS</th><th>IP</th><th>Status</th><th></th></tr>${r.items.map(d => `<tr><td>${esc(d.hostname)}</td><td>${esc(d.os)}</td><td>${esc(d.ip)}</td>
+      <td><select data-dev="${d.id}">${['healthy', 'needs_attention', 'offline'].map(s => `<option ${d.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></td>
+      <td>${user.role === 'admin' ? `<button class="btn danger" data-rm="${d.id}">Delete</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">No devices</td></tr>'}</table></div>${pager(r.total, r.page, r.limit, 'd')}`;
+    document.querySelectorAll('[data-dev]').forEach(s => s.onchange = async () => { const d = r.items.find(x => x.id == s.dataset.dev); await api('PUT', '/devices/' + d.id, { ...d, status: s.value }); load(); });
+    document.querySelectorAll('[data-rm]').forEach(b => b.onclick = async () => { if (confirm('Delete device?')) { await api('DELETE', '/devices/' + b.dataset.rm); load(); } });
+    document.querySelectorAll('[data-pg="d"]').forEach(b => b.onclick = () => { state.dpage += +b.dataset.d; load(); });
+  };
+  $('#dq').oninput = debounce(e => { state.dq = e.target.value; state.dpage = 1; load(); });
+  $('#dst').onchange = e => { state.dstatus = e.target.value; state.dpage = 1; load(); };
+  $('#dadd').onclick = async () => { try { await api('POST', '/devices', { hostname: $('#dh').value, os: $('#dos').value, ip: $('#dip').value }); renderDevices(); } catch (e) { $('#derr').textContent = e.message; } };
+  load();
+}
+
+async function renderUsers() {
+  const us = await api('GET', '/users');
+  $('#main').innerHTML = `<div class="card"><div class="err" id="uerr"></div><div class="table-wrap"><table><tr><th>Name</th><th>Email</th><th>Role</th></tr>${us.map(u => `<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td>
+    <td><select data-uid="${u.id}">${['user', 'agent', 'admin'].map(r => `<option ${u.role === r ? 'selected' : ''}>${r}</option>`).join('')}</select></td></tr>`).join('')}</table></div></div>`;
+  document.querySelectorAll('[data-uid]').forEach(s => s.onchange = async () => { try { await api('PATCH', `/users/${s.dataset.uid}/role`, { role: s.value }); } catch (e) { $('#uerr').textContent = e.message; } });
+}
+
+async function renderAudit() {
+  const rows = await api('GET', '/audit');
+  $('#main').innerHTML = `<div class="card"><div class="table-wrap"><table><tr><th>Time</th><th>User</th><th>Action</th><th>Entity</th></tr>${rows.map(a => `<tr><td>${esc(a.created_at)}</td><td>${esc(a.user_name || '-')}</td><td>${esc(a.action)}</td><td>${esc(a.entity)} #${a.entity_id ?? ''}</td></tr>`).join('')}</table></div></div>`;
+}
+
+render();
+</script>
+</body>
+</html>
